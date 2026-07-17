@@ -5,63 +5,77 @@ import time
 import re
 from io import BytesIO
 
+# Cấu hình giao diện trang web
 st.set_page_config(page_title="Công Cụ Cào Dữ Liệu Tự Động", page_icon="🍜", layout="centered")
 
 st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
 st.write("Mẹ dán Link quán hoặc nhập trực tiếp mã ID quán vào ô dưới đây rồi bấm nút nhé!")
 
-def get_shopeefood_id_from_foody(foody_id):
-    """
-    Sử dụng API của ShopeeFood để tìm kiếm và quy đổi ID Foody sang ID ShopeeFood tương ứng.
-    """
-    search_url = f"https://gappapi.deliverynow.vn/api/v5/reply/get_replies"
-    # Thử gọi trực tiếp bằng ID (nhiều trường hợp ID Foody và ID ShopeeFood khớp nhau)
-    return foody_id
-
 def extract_restaurant_id(url_or_id):
-    # Nếu là chuỗi số
+    """
+    Hàm bóc tách ID quán thông minh:
+    - Nếu nhập ID số: Giữ nguyên.
+    - Nếu dán link: Cắt bỏ rác, lấy alias tên quán và gọi API ShopeeFood để tìm ID chuẩn 100%.
+    """
+    # 1. Nếu người dùng nhập thẳng số ID
     if url_or_id.isdigit():
         return url_or_id, "ShopeeFood"
 
-    # Làm sạch URL
-    clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai|khuyen-mai|uu-dai-dac-biet).*$', '', url_or_id.strip())
-
-    # Trường hợp dán link ShopeeFood hoặc Foody
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    clean_url = url_or_id.strip()
     
-    try:
-        response = requests.get(clean_url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            html_text = response.text
-            
-            # Quét ShopeeFood ID từ HTML trước
-            shopee_match = re.search(r'"restaurant_id":\s*(\d+)', html_text)
-            if shopee_match:
-                return shopee_match.group(1), "ShopeeFood"
-            
-            shopee_match_alt = re.search(r'restaurantId\\":\s*(\d+)', html_text)
-            if shopee_match_alt:
-                return shopee_match_alt.group(1), "ShopeeFood"
-                
-            # Nếu là link Foody, tìm ID Foody rồi chuyển đổi sang hệ ShopeeFood
-            foody_match = re.search(r'"Id":\s*([2-9]\d{2,})', html_text)
-            if foody_match and foody_match.group(1) != "8991422":
-                return foody_match.group(1), "ShopeeFood"
-                
-            fd_res_match = re.search(r'fd\.res\.view\.\d+\s*=\s*(\d+)', html_text)
-            if fd_res_match:
-                return fd_res_match.group(1), "ShopeeFood"
+    # 2. Làm sạch link: Cắt bỏ các hậu tố như /binh-luan, /thuc-don...
+    clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai|khuyen-mai|uu-dai-dac-biet).*$', '', clean_url)
 
-            url_numbers = re.findall(r'\d+', clean_url)
-            if url_numbers and len(url_numbers[-1]) >= 4:
-                return url_numbers[-1], "ShopeeFood"
-    except Exception as e:
-        st.error(f"Lỗi khi đọc link: {e}")
+    # 3. Xử lý link Foody (Ví dụ: https://www.foody.vn/ha-noi/banh-mi-sot-vang-dinh-ngang)
+    # Trích xuất phần "alias" tên quán ở cuối đường dẫn
+    match_alias = re.search(r'foody\.vn/[^/]+/([^/]+)', clean_url)
+    if match_alias:
+        alias = match_alias.group(1)
+        
+        # Gọi API Search của ShopeeFood để truy quét ID thật dựa trên tên quán (alias)
+        search_api = "https://gappapi.deliverynow.vn/api/v5/delivery/search_restaurant"
+        headers = {
+            "x-foody-client-type": "1",
+            "x-foody-api-version": "1",
+            "x-foody-client-version": "3.0.0",
+            "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
+        }
+        # Đổi dấu gạch ngang '-' thành khoảng trắng để Shopee tìm kiếm chuẩn hơn
+        search_keyword = alias.replace('-', ' ')
+        params = {
+            "keyword": search_keyword,
+            "limit": "5"
+        }
+        try:
+            r = requests.get(search_api, headers=headers, params=params, timeout=10)
+            if r.status_code == 200:
+                restaurants = r.json().get("reply", {}).get("restaurants", [])
+                if restaurants:
+                    # Lấy ID của quán đầu tiên (độ khớp cao nhất)
+                    shopee_id = restaurants[0].get("restaurant_id")
+                    if shopee_id:
+                        return str(shopee_id), "ShopeeFood"
+        except Exception:
+            pass
+
+    # 4. Xử lý link ShopeeFood trực tiếp (nếu mẹ dán link shopeefood.vn)
+    shopee_url_match = re.search(r'shopeefood\.vn/[^/]+/([^/]+)$', clean_url)
+    if shopee_url_match:
+        alias = shopee_url_match.group(1)
+        id_match = re.findall(r'\d+', alias)
+        if id_match:
+            return id_match[-1], "ShopeeFood"
+
+    # 5. Phương án dự phòng cuối: quét mọi chuỗi số xuất hiện trong link (loại trừ các số ID rác đã biết)
+    url_numbers = re.findall(r'\d+', clean_url)
+    if url_numbers:
+        valid_numbers = [num for num in url_numbers if num not in ["54270", "8991422"] and len(num) >= 4]
+        if valid_numbers:
+            return valid_numbers[-1], "ShopeeFood"
         
     return None, None
 
+# Ô nhập liệu thân thiện cho mẹ
 input_data = st.text_input("Dán link quán HOẶC nhập mã ID quán tại đây:", placeholder="Ví dụ: dán link hoặc nhập thẳng số ID như 4359...")
 
 if st.button("🚀 Bắt đầu cào dữ liệu"):
@@ -74,7 +88,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
             res_id, platform = extract_restaurant_id(input_data.strip())
             
         if not res_id:
-            st.error("Không tìm thấy ID của quán từ liên kết này. Mẹ thử nhập trực tiếp ID xem nhé!")
+            st.error("Không tìm thấy ID của quán từ liên kết này. Mẹ thử nhập trực tiếp mã ID (ví dụ: 4359) xem nhé!")
         else:
             st.info(f"Đang kết nối hệ thống ShopeeFood để tải bình luận cho quán (Mã ID: {res_id})...")
             
@@ -82,7 +96,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # CÀO SHOPEEFOOD (Cực kỳ ổn định và không cần cookie)
+            # API ShopeeFood (ổn định, bảo mật thoáng, dùng chung database bình luận với Foody)
             headers = {
                 "x-foody-client-type": "1",
                 "x-foody-api-version": "1",
@@ -91,7 +105,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
             }
             api_url = "https://gappapi.deliverynow.vn/api/v5/reply/get_replies"
             
-            # Tăng số trang lên để cào được nhiều bình luận hơn (Ví dụ cào 8 trang = 80 bình luận gần nhất)
+            # Cào 8 trang gần nhất (khoảng 80 bình luận có nội dung)
             total_pages = 8
             for page in range(1, total_pages + 1):
                 status_text.text(f"Đang tải bình luận - Trang {page}/{total_pages}...")
@@ -101,7 +115,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     "restaurant_id": res_id,
                     "page": str(page),
                     "count": "10",
-                    "reply_type": "1" # Lấy các bình luận có text nội dung
+                    "reply_type": "1"  # Chỉ lấy những bình luận có chữ viết kèm theo
                 }
                 try:
                     r = requests.get(api_url, headers=headers, params=params, timeout=10)
@@ -110,8 +124,8 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                         replies = data_json.get("reply_infos", [])
                         if not replies: 
                             break
+                        
                         for item in replies:
-                            # Chuyển đổi timestamp của Shopee sang ngày đọc được
                             timestamp = item.get("create_time")
                             date_str = time.strftime('%d-%m-%Y %H:%M:%S', time.localtime(timestamp)) if timestamp else "N/A"
                             
@@ -122,10 +136,10 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                                 "Nội dung bình luận": item.get("message", ""),
                                 "Thời gian đăng": date_str
                             })
-                        time.sleep(1) # Giãn cách nhẹ tránh spam
+                        time.sleep(1)  # Giãn cách nhẹ tránh bị hệ thống quét spam
                     else:
                         break
-                except Exception as e:
+                except Exception:
                     break
 
             progress_bar.progress(100)
@@ -138,7 +152,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     df.to_excel(writer, index=False, sheet_name='Bình luận')
                 processed_data = output.getvalue()
                 
-                st.success(f"🎉 Tuyệt vời mẹ ơi! Đã cào thành công {len(all_comments)} bình luận chân thực nhất từ ShopeeFood!")
+                st.success(f"🎉 Tuyệt vời mẹ ơi! Đã cào thành công {len(all_comments)} bình luận chân thực nhất!")
                 
                 st.download_button(
                     label="📥 Bấm vào đây để tải file Excel về máy",
@@ -148,4 +162,4 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     key=f"download_{int(time.time())}"
                 )
             else:
-                st.warning("Hệ thống không tìm thấy bình luận nào thông qua cổng này. Mẹ thử dán link của quán từ trang ShopeeFood.vn trực tiếp xem sao nhé!")
+                st.warning("Hệ thống không tìm thấy bình luận nào thông qua cổng này. Mẹ thử dán link của quán trực tiếp từ trang ShopeeFood.vn xem sao nhé!")
