@@ -10,44 +10,47 @@ st.set_page_config(page_title="Công Cụ Cào Dữ Liệu Tự Động", page_i
 st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
 st.write("Mẹ dán Link quán hoặc nhập trực tiếp mã ID quán vào ô dưới đây rồi bấm nút nhé!")
 
-# Hàm tự động quét tìm ID quán từ HTML của đường link
 def extract_restaurant_id(url_or_id):
-    # Nếu người dùng nhập thẳng một chuỗi số (ID quán)
+    # Nếu người dùng nhập thẳng số ID
     if url_or_id.isdigit():
         if len(url_or_id) < 8:
             return url_or_id, "Foody"
         else:
             return url_or_id, "ShopeeFood"
 
-    # Làm sạch URL: Nếu link có đuôi /binh-luan, /khuyen-mai... thì cắt bỏ đi để lấy link gốc của quán
+    # Làm sạch URL
     clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai|khuyen-mai|uu-dai-dac-biet).*$', '', url_or_id.strip())
 
+    # Trích xuất "alias" từ link Foody (ví dụ: banh-mi-sot-vang-dinh-ngang)
+    # Cấu trúc link: https://www.foody.vn/tinh-thanh/ten-quan
+    match_alias = re.search(r'foody\.vn/[^/]+/([^/]+)', clean_url)
+    if match_alias:
+        alias = match_alias.group(1)
+        # Sử dụng API search công khai của Foody để tìm ID thật thông qua alias này
+        search_api = f"https://www.foody.vn/__get/Restaurant/Detail?url={alias}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        try:
+            r = requests.get(search_api, headers=headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                # API của Foody trả về rất nhiều thông tin, ta bốc đúng ID quán ra
+                res_id = data.get("Id") or data.get("RestaurantId")
+                if res_id:
+                    return str(res_id), "Foody"
+        except:
+            pass
+
+    # Nếu cách trên thất bại, chuyển sang quét HTML thô như cũ làm phương án dự phòng
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         response = requests.get(clean_url, headers=headers, timeout=10)
         if response.status_code == 200:
             html_text = response.text
             
-            # 1. Tìm ID kiểu Foody trong thẻ meta hoặc script
-            # Tìm ID trong fd.res.view hoặc các biến cấu trúc của Foody
-            foody_match = re.search(r'"Id":\s*([2-9]\d{2,})', html_text)
-            if foody_match:
-                # Kiểm tra tránh lấy nhầm ID người dùng hoặc ID ảo quá nhỏ
-                val = foody_match.group(1)
-                if val != "8991422": # Loại trừ ID trang bình luận chung
-                    return val, "Foody"
-            
-            # Tìm cua phòng hờ Foody bằng regex quét từ javascript gốc của trang
-            fd_res_match = re.search(r'fd\.res\.view\.\d+\s*=\s*(\d+)', html_text)
-            if fd_res_match:
-                return fd_res_match.group(1), "Foody"
-
-            # Quét số cuối cùng trong URL làm phương án dự phòng (Foody cũ thường để ID ở cuối link)
-            url_numbers = re.findall(r'\d+', clean_url)
-            if url_numbers and len(url_numbers[-1]) >= 4:
-                return url_numbers[-1], "Foody"
-            
-            # 2. Quét tìm ID kiểu ShopeeFood
+            # Quét ShopeeFood
             shopee_match = re.search(r'"restaurant_id":\s*(\d+)', html_text)
             if shopee_match:
                 return shopee_match.group(1), "ShopeeFood"
@@ -55,8 +58,9 @@ def extract_restaurant_id(url_or_id):
             shopee_match_alt = re.search(r'restaurantId\\":\s*(\d+)', html_text)
             if shopee_match_alt:
                 return shopee_match_alt.group(1), "ShopeeFood"
-    except Exception as e:
-        st.error(f"Không thể kết nối tới đường link để lấy ID tự động: {e}")
+    except:
+        pass
+        
     return None, None
 
 # Ô nhập đa năng cho mẹ
@@ -71,8 +75,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
         with st.spinner("🚀 Đang xử lý thông tin..."):
             res_id, platform = extract_restaurant_id(input_data.strip())
             
-        # Phòng hờ nếu quét ra ID không hợp lệ
-        if not res_id or res_id in ["1", "8991422"]:
+        if not res_id:
             st.error("Không thể lấy ID tự động từ link này. Mẹ vui lòng nhập trực tiếp mã ID của quán (ví dụ: 4359) vào ô trên nhé!")
         else:
             st.info(f"Đang tiến hành cào ID quán: {res_id} (Hệ thống: {platform})")
