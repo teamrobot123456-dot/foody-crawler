@@ -11,14 +11,33 @@ st.set_page_config(page_title="Công Cụ Cào Dữ Liệu", page_icon="🍜", l
 st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
 st.write("Mẹ chỉ cần dán link quán (ShopeeFood hoặc Foody) vào ô dưới đây rồi bấm nút nhé!")
 
+def find_key_recursive(data, target_key):
+    """
+    Hàm tìm kiếm sâu trong JSON để lục tìm ID của quán
+    """
+    if isinstance(data, dict):
+        if target_key in data:
+            return data[target_key]
+        for v in data.values():
+            res = find_key_recursive(v, target_key)
+            if res is not None:
+                return res
+    elif isinstance(data, list):
+        for item in data:
+            res = find_key_recursive(item, target_key)
+            if res is not None:
+                return res
+    return None
+
 def get_shopeefood_id_from_url(url):
     """
-    Hàm tự động truy cập vào trang web ShopeeFood/Foody để bóc tách ID ẩn trong HTML
+    Giải mã link Foody/ShopeeFood thành ID chuẩn bằng API chính thức
     """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+        "x-foody-client-type": "1",
+        "x-foody-api-version": "1",
+        "x-foody-client-version": "3.0.0",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     clean_url = url.strip()
@@ -27,45 +46,33 @@ def get_shopeefood_id_from_url(url):
     if clean_url.isdigit():
         return clean_url
 
-    try:
-        # 2. Nếu là link Foody
-        if "foody.vn" in clean_url:
-            # Cắt bỏ phần /binh-luan ở cuối nếu có
-            clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai).*$', '', clean_url)
-            r = requests.get(clean_url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                # Ưu tiên tìm link ShopeeFood được tích hợp trong nút đặt hàng của Foody
-                shopee_link_match = re.search(r'href="([^"]*shopeefood\.vn/[^"]*)"', r.text) or re.search(r'href="([^"]*deliverynow\.vn/[^"]*)"', r.text)
-                if shopee_link_match:
-                    clean_url = shopee_link_match.group(1)
-                else:
-                    # Nếu không tìm thấy link ShopeeFood, mới dùng tạm ID Foody làm phương án dự phòng
-                    foody_id_match = re.search(r'"RestaurantId"\s*:\s*(\d+)', r.text) or re.search(r'RestaurantID=(\d+)', r.text)
-                    if foody_id_match:
-                        return foody_id_match.group(1)
+    # 2. Xử lý cắt chuỗi để lấy tên không dấu của quán (Slug)
+    # Loại bỏ các tham số rác đằng sau dấu chấm hỏi (?) nếu có
+    clean_url = clean_url.split("?")[0].strip("/")
+    # Loại bỏ các đuôi phụ của Foody như /binh-luan, /thuc-don...
+    clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai).*$', '', clean_url)
+    
+    # Lấy phần chữ cuối cùng trong link làm slug
+    slug = clean_url.split("/")[-1]
+    
+    if not slug:
+        return None
 
-        # 3. Truy cập vào link ShopeeFood để bới ID chuẩn
-        if "shopeefood.vn" in clean_url or "deliverynow.vn" in clean_url:
-            r = requests.get(clean_url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                html_content = r.text
-                
-                # Quét ID ShopeeFood trong Redux State hoặc cấu hình web
-                patterns = [
-                    r'"restaurant_id"\s*:\s*(\d+)',
-                    r'"restaurantId"\s*:\s*(\d+)',
-                    r'"delivery_id"\s*:\s*(\d+)',
-                    r'"id"\s*:\s*(\d+)',
-                    r'restaurant/(\d+)'
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, html_content)
-                    if match:
-                        return match.group(1)
-    except Exception as e:
-        st.warning(f"Lưu ý: Hệ thống gặp chút gián đoạn khi quét tự động ({str(e)})")
+    try:
+        # Gọi API ẩn của ShopeeFood để tra cứu chi tiết quán bằng tên không dấu (Slug)
+        api_resolve_url = f"https://gappapi.deliverynow.vn/api/delivery/get_detail?request_value={slug}&request_type=2"
+        r = requests.get(api_resolve_url, headers=headers, timeout=10)
         
-    # Phương án dự phòng cuối cùng: quét mọi chuỗi số xuất hiện trong link
+        if r.status_code == 200:
+            json_data = r.json()
+            # Lục lọi trong kết quả trả về để tìm restaurant_id chuẩn của ShopeeFood
+            restaurant_id = find_key_recursive(json_data, "restaurant_id")
+            if restaurant_id:
+                return str(restaurant_id)
+    except Exception as e:
+        st.warning(f"Đang thử phương án dự phòng do hệ thống bận...")
+
+    # Phương án dự phòng cuối cùng: Tìm chuỗi số cuối cùng có trong link dán vào
     numbers = re.findall(r'\d+', clean_url)
     if numbers:
         valid_numbers = [num for num in numbers if num not in ["54270", "8991422"] and len(num) >= 4]
@@ -74,8 +81,8 @@ def get_shopeefood_id_from_url(url):
             
     return None
 
-# Ô nhập liệu cực kỳ đơn giản cho mẹ
-input_data = st.text_input("Dán link quán tại đây:", placeholder="Ví dụ: https://shopeefood.vn/ha-noi/bun-cha-obama-nguyen-thi-dinh")
+# Giao diện chính cho mẹ sử dụng
+input_data = st.text_input("Dán link quán tại đây:", placeholder="Ví dụ: https://www.foody.vn/ha-noi/banh-mi-sot-vang-dinh-ngang")
 
 if st.button("🚀 Bắt đầu cào dữ liệu"):
     if not input_data:
@@ -83,13 +90,13 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
     else:
         st.cache_data.clear()
         
-        with st.spinner("🔍 Đang tự động phân tích và lấy ID quán ẩn dưới nền..."):
+        with st.spinner("🔍 Hệ thống đang tự động phân tích và lấy ID quán ẩn..."):
             res_id = get_shopeefood_id_from_url(input_data)
             
         if not res_id:
             st.error("Không thể tự động tìm thấy ID của quán này. Mẹ kiểm tra lại link xem có đúng không nhé!")
         else:
-            st.info(f"🎉 Đã tìm thấy ID quán: {res_id}! Đang tiến hành tải bình luận...")
+            st.info(f"🎉 Đã kết nối thành công với quán (ID ShopeeFood: {res_id})! Đang tiến hành tải bình luận...")
             
             all_comments = []
             progress_bar = st.progress(0)
