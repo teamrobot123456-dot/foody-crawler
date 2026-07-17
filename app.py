@@ -9,59 +9,93 @@ from io import BytesIO
 st.set_page_config(page_title="Công Cụ Cào Dữ Liệu", page_icon="🍜", layout="centered")
 
 st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
-st.write("Dành riêng cho mẹ cào dữ liệu ShopeeFood/Foody nhanh chóng!")
+st.write("Mẹ chỉ cần dán link quán (ShopeeFood hoặc Foody) vào ô dưới đây rồi bấm nút nhé!")
 
-# Bảng hướng dẫn mẹ lấy ID cực kỳ dễ hiểu
-with st.expander("💡 MẸ ƠI, BẤM VÀO ĐÂY XEM CÁCH LẤY MÃ ID QUÁN NHÉ!", expanded=True):
-    st.markdown("""
-    Vì hệ thống bảo mật chặn link trực tiếp, mẹ chỉ cần lấy **Mã ID (dạng số)** của quán theo 2 cách siêu dễ sau:
+def get_shopeefood_id_from_url(url):
+    """
+    Hàm tự động truy cập vào trang web ShopeeFood/Foody để bóc tách ID ẩn trong HTML
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
     
-    1. **Lấy từ link ShopeeFood (Nhanh nhất):**
-       * Mẹ tìm quán trên ShopeeFood, link quán sẽ có dạng: `shopeefood.vn/ha-noi/hoang-beo-pham-ngoc-thach-1000034567`
-       * Mẹ chỉ cần copy dãy số ở cuối cùng: **`1000034567`** dán vào ô bên dưới nhé!
+    clean_url = url.strip()
     
-    2. **Lấy từ link Foody:**
-       * Khi mẹ mở link Foody của quán, mẹ tìm nút màu đỏ **"Đặt giao hàng"** hoặc **"Đặt bàn"**.
-       * Mã ID chính là dãy số đi kèm với nút đó.
-    """)
+    # 1. Nếu người dùng nhập thẳng số ID thì dùng luôn
+    if clean_url.isdigit():
+        return clean_url
 
-def extract_id_from_input(user_input):
-    """
-    Trích xuất ID chuẩn: lấy chuỗi số cuối cùng từ link hoặc giữ nguyên nếu nhập số.
-    """
-    val = user_input.strip()
-    if val.isdigit():
-        return val
-    
-    # Nếu dán cả link, tự lọc ra chuỗi số cuối cùng (thường là ID quán trên ShopeeFood)
-    numbers = re.findall(r'\d+', val)
+    try:
+        # 2. Nếu là link Foody, thử chuyển hướng hoặc tìm cách quét link ShopeeFood tương ứng
+        if "foody.vn" in clean_url:
+            # Cắt bỏ phần /binh-luan ở cuối nếu có
+            clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai).*$', '', clean_url)
+            # Thử gọi lên Foody để lấy HTML và tìm ID quán hoặc link ShopeeFood đi kèm
+            r = requests.get(clean_url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                # Tìm ID của Foody trong HTML
+                foody_id_match = re.search(r'"RestaurantId"\s*:\s*(\d+)', r.text) or re.search(r'RestaurantID=(\d+)', r.text)
+                if foody_id_match:
+                    return foody_id_match.group(1)
+                
+                # Hoặc tìm link ShopeeFood chứa trong nút "Đặt giao hàng"
+                shopee_link_match = re.search(r'href="([^"]*shopeefood\.vn/[^"]*)"', r.text)
+                if shopee_link_match:
+                    clean_url = shopee_link_match.group(1)
+
+        # 3. Truy cập thẳng vào link ShopeeFood để bới ID ẩn trong HTML
+        if "shopeefood.vn" in clean_url:
+            r = requests.get(clean_url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                html_content = r.text
+                
+                # Tìm kiếm ID trong các thẻ cấu hình ẩn của ShopeeFood (Thường nằm trong Redux State hoặc Meta tags)
+                patterns = [
+                    r'"restaurant_id"\s*:\s*(\d+)',
+                    r'"restaurantId"\s*:\s*(\d+)',
+                    r'"delivery_id"\s*:\s*(\d+)',
+                    r'"id"\s*:\s*(\d+)',
+                    r'restaurant/(\d+)'
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, html_content)
+                    if match:
+                        return match.group(1)
+    except Exception as e:
+        st.warning(f"Lưu ý: Hệ thống gặp chút gián đoạn khi quét tự động ({str(e)})")
+        
+    # Phương án dự phòng cuối cùng: quét mọi chuỗi số xuất hiện trong link
+    numbers = re.findall(r'\d+', clean_url)
     if numbers:
-        # Bỏ qua các số ID rác của trang danh mục Foody
-        valid_numbers = [n for n in numbers if n not in ["54270", "8991422"] and len(n) >= 4]
+        valid_numbers = [num for num in numbers if num not in ["54270", "8991422"] and len(num) >= 4]
         if valid_numbers:
             return valid_numbers[-1]
+            
     return None
 
-# Ô nhập liệu
-input_data = st.text_input("Mẹ nhập mã ID quán (hoặc link quán chứa ID số ở cuối) vào đây:", placeholder="Ví dụ: 4359 hoặc 1000034567...")
+# Ô nhập liệu cực kỳ đơn giản cho mẹ
+input_data = st.text_input("Dán link quán tại đây:", placeholder="Ví dụ: https://shopeefood.vn/ha-noi/bun-cha-obama-nguyen-thi-dinh")
 
 if st.button("🚀 Bắt đầu cào dữ liệu"):
     if not input_data:
-        st.warning("Mẹ ơi, mẹ chưa điền thông tin vào ô kìa!")
+        st.warning("Mẹ ơi, mẹ chưa dán link vào kìa!")
     else:
         st.cache_data.clear()
-        res_id = extract_id_from_input(input_data)
         
+        with st.spinner("🔍 Đang tự động phân tích và lấy ID quán ẩn dưới nền..."):
+            res_id = get_shopeefood_id_from_url(input_data)
+            
         if not res_id:
-            st.error("Không nhận diện được ID số. Mẹ vui lòng nhập đúng dãy số ID của quán nhé!")
+            st.error("Không thể tự động tìm thấy ID của quán này. Mẹ kiểm tra lại link xem có đúng không nhé!")
         else:
-            st.info(f"Đang kết nối hệ thống để tải bình luận cho quán (Mã ID: {res_id})...")
+            st.info(f"🎉 Đã tìm thấy ID quán: {res_id}! Đang tiến hành tải bình luận...")
             
             all_comments = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # API ShopeeFood gọi trực tiếp bằng ID (Không bao giờ lỗi)
             headers = {
                 "x-foody-client-type": "1",
                 "x-foody-api-version": "1",
@@ -112,7 +146,6 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
             if all_comments:
                 df = pd.DataFrame(all_comments)
                 
-                # Xuất file an toàn
                 try:
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -136,4 +169,4 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     key=f"download_{int(time.time())}"
                 )
             else:
-                st.warning("Không tìm thấy bình luận nào cho ID này. Mẹ kiểm tra lại xem có nhập nhầm số ID của quán khác không nhé!")
+                st.warning("Hệ thống không tìm thấy bình luận nào cho quán này. Mẹ thử dán link khác xem nhé!")
