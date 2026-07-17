@@ -11,60 +11,36 @@ st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
 st.write("Mẹ dán Link quán hoặc nhập trực tiếp mã ID quán vào ô dưới đây rồi bấm nút nhé!")
 
 def extract_restaurant_id(url_or_id):
-    # Nếu người dùng nhập thẳng số ID
     if url_or_id.isdigit():
         if len(url_or_id) < 8:
             return url_or_id, "Foody"
         else:
             return url_or_id, "ShopeeFood"
 
-    # Làm sạch URL
     clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai|khuyen-mai|uu-dai-dac-biet).*$', '', url_or_id.strip())
 
-    # Trích xuất "alias" từ link Foody (ví dụ: banh-mi-sot-vang-dinh-ngang)
-    # Cấu trúc link: https://www.foody.vn/tinh-thanh/ten-quan
     match_alias = re.search(r'foody\.vn/[^/]+/([^/]+)', clean_url)
     if match_alias:
         alias = match_alias.group(1)
-        # Sử dụng API search công khai của Foody để tìm ID thật thông qua alias này
         search_api = f"https://www.foody.vn/__get/Restaurant/Detail?url={alias}"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "X-Requested-With": "XMLHttpRequest"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.foody.vn/"
         }
         try:
             r = requests.get(search_api, headers=headers, timeout=10)
             if r.status_code == 200:
                 data = r.json()
-                # API của Foody trả về rất nhiều thông tin, ta bốc đúng ID quán ra
                 res_id = data.get("Id") or data.get("RestaurantId")
                 if res_id:
                     return str(res_id), "Foody"
         except:
             pass
-
-    # Nếu cách trên thất bại, chuyển sang quét HTML thô như cũ làm phương án dự phòng
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    try:
-        response = requests.get(clean_url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            html_text = response.text
             
-            # Quét ShopeeFood
-            shopee_match = re.search(r'"restaurant_id":\s*(\d+)', html_text)
-            if shopee_match:
-                return shopee_match.group(1), "ShopeeFood"
-            
-            shopee_match_alt = re.search(r'restaurantId\\":\s*(\d+)', html_text)
-            if shopee_match_alt:
-                return shopee_match_alt.group(1), "ShopeeFood"
-    except:
-        pass
-        
     return None, None
 
-# Ô nhập đa năng cho mẹ
-input_data = st.text_input("Dán link quán HOẶC nhập mã ID quán tại đây:", placeholder="Ví dụ: dán link hoặc nhập thẳng số ID như 16787...")
+input_data = st.text_input("Dán link quán HOẶC nhập mã ID quán tại đây:", placeholder="Ví dụ: dán link hoặc nhập thẳng số ID như 4359...")
 
 if st.button("🚀 Bắt đầu cào dữ liệu"):
     if not input_data:
@@ -84,15 +60,14 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # CÀO FOODY
+            # CÀO FOODY (ĐÃ TỐI ƯU HEADER SẠCH)
             if platform == "Foody":
-                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                cookie = "flg=vn; __ondemand_sessionid=vn23gsnjnutvfpyaj1gv2bcd; floc=218; gcat=food;"
+                # Dùng các thông số header cơ bản, không nhồi nhét cookie cũ tránh bị nghi ngờ
                 headers = {
-                    "user-agent": user_agent,
-                    "cookie": cookie,
-                    "accept": "application/json, text/javascript, */*; q=0.01",
-                    "x-requested-with": "XMLHttpRequest"
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": f"https://www.foody.vn/nhahang/detail?id={res_id}"
                 }
                 api_url = "https://www.foody.vn/__get/Review/ResLoadMore"
                 last_id = ""
@@ -111,8 +86,12 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     try:
                         r = requests.get(api_url, headers=headers, params=params, timeout=10)
                         if r.status_code == 200:
-                            items = r.json().get("Items", [])
-                            if not items: break
+                            # Thử bóc tách JSON an toàn
+                            res_json = r.json()
+                            items = res_json.get("Items", []) if isinstance(res_json, dict) else []
+                            
+                            if not items: 
+                                break
                             for item in items:
                                 all_comments.append({
                                     "Nền tảng": "Foody",
@@ -122,10 +101,12 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                                     "Ngày đăng": item.get("CreatedDate")
                                 })
                             last_id = str(items[-1].get("Id"))
-                            time.sleep(1)
+                            time.sleep(1.5)
                         else:
+                            st.error(f"Phía Foody từ chối kết nối (Mã lỗi: {r.status_code}).")
                             break
-                    except:
+                    except Exception as e:
+                        st.error(f"Lỗi khi tải trang {page}: {str(e)}")
                         break
             
             # CÀO SHOPEEFOOD
@@ -160,14 +141,16 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                                     "Nội dung bình luận": item.get("message"),
                                     "Ngày đăng": item.get("create_time")
                                 })
-                            time.sleep(1)
+                            time.sleep(1.5)
                         else:
+                            st.error(f"Phía ShopeeFood từ chối kết nối (Mã lỗi: {r.status_code}).")
                             break
-                    except:
+                    except Exception as e:
+                        st.error(f"Lỗi khi tải trang {page}: {str(e)}")
                         break
 
             progress_bar.progress(100)
-            status_text.text("Đã hoàn thành!")
+            status_text.text("Đã xử lý xong!")
 
             if all_comments:
                 df = pd.DataFrame(all_comments)
@@ -176,7 +159,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     df.to_excel(writer, index=False, sheet_name='Comments')
                 processed_data = output.getvalue()
                 
-                st.success(f"🎉 Xuất sắc mẹ ơi! Đã cào thành công {len(all_comments)} bình luận của quán!")
+                st.success(f"🎉 Xuất sắc mẹ ơi! Đã cào thành công {len(all_comments)} bình luận!")
                 
                 st.download_button(
                     label="📥 Bấm vào đây để tải file Excel về máy",
@@ -186,4 +169,4 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     key=f"download_{int(time.time())}"
                 )
             else:
-                st.warning("Không tìm thấy bình luận nào cho quán này.")
+                st.warning("Không tìm thấy bình luận nào cho quán này. Mẹ kiểm tra lại xem quán có bình luận nào hiển thị công khai không nhé!")
