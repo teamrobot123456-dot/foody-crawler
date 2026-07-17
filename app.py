@@ -5,81 +5,63 @@ import time
 import re
 from io import BytesIO
 
-# Cấu hình giao diện trang web
-st.set_page_config(page_title="Công Cụ Cào Dữ Liệu Tự Động", page_icon="🍜", layout="centered")
+# Cấu hình giao diện
+st.set_page_config(page_title="Công Cụ Cào Dữ Liệu", page_icon="🍜", layout="centered")
 
 st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
-st.write("Mẹ dán Link quán hoặc nhập trực tiếp mã ID quán vào ô dưới đây rồi bấm nút nhé!")
+st.write("Dành riêng cho mẹ cào dữ liệu ShopeeFood/Foody nhanh chóng!")
 
-def extract_restaurant_id(url_or_id):
+# Bảng hướng dẫn mẹ lấy ID cực kỳ dễ hiểu
+with st.expander("💡 MẸ ƠI, BẤM VÀO ĐÂY XEM CÁCH LẤY MÃ ID QUÁN NHÉ!", expanded=True):
+    st.markdown("""
+    Vì hệ thống bảo mật chặn link trực tiếp, mẹ chỉ cần lấy **Mã ID (dạng số)** của quán theo 2 cách siêu dễ sau:
+    
+    1. **Lấy từ link ShopeeFood (Nhanh nhất):**
+       * Mẹ tìm quán trên ShopeeFood, link quán sẽ có dạng: `shopeefood.vn/ha-noi/hoang-beo-pham-ngoc-thach-1000034567`
+       * Mẹ chỉ cần copy dãy số ở cuối cùng: **`1000034567`** dán vào ô bên dưới nhé!
+    
+    2. **Lấy từ link Foody:**
+       * Khi mẹ mở link Foody của quán, mẹ tìm nút màu đỏ **"Đặt giao hàng"** hoặc **"Đặt bàn"**.
+       * Mã ID chính là dãy số đi kèm với nút đó.
+    """)
+
+def extract_id_from_input(user_input):
     """
-    Hàm bóc tách ID quán an toàn, không bao giờ gây sập app.
+    Trích xuất ID chuẩn: lấy chuỗi số cuối cùng từ link hoặc giữ nguyên nếu nhập số.
     """
-    try:
-        if url_or_id.isdigit():
-            return url_or_id, "ShopeeFood"
-
-        clean_url = url_or_id.strip()
-        clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai|khuyen-mai|uu-dai-dac-biet).*$', '', clean_url)
-
-        # Xử lý link Foody bằng cách tìm kiếm trên ShopeeFood
-        match_alias = re.search(r'foody\.vn/[^/]+/([^/]+)', clean_url)
-        if match_alias:
-            alias = match_alias.group(1)
-            search_api = "https://gappapi.deliverynow.vn/api/v5/delivery/search_restaurant"
-            headers = {
-                "x-foody-client-type": "1",
-                "x-foody-api-version": "1",
-                "x-foody-client-version": "3.0.0",
-                "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"
-            }
-            search_keyword = alias.replace('-', ' ')
-            params = {"keyword": search_keyword, "limit": "5"}
-            
-            r = requests.get(search_api, headers=headers, params=params, timeout=10)
-            if r.status_code == 200:
-                restaurants = r.json().get("reply", {}).get("restaurants", [])
-                if restaurants:
-                    shopee_id = restaurants[0].get("restaurant_id")
-                    if shopee_id:
-                        return str(shopee_id), "ShopeeFood"
-    except Exception as e:
-        st.warning(f"Lưu ý nhẹ: Có chút lỗi khi tự nhận diện link ({str(e)}).")
-        
-    # Phương án dự phòng: Tìm chuỗi số cuối cùng trong link
-    try:
-        url_numbers = re.findall(r'\d+', url_or_id)
-        if url_numbers:
-            valid_numbers = [num for num in url_numbers if num not in ["54270", "8991422"] and len(num) >= 4]
-            if valid_numbers:
-                return valid_numbers[-1], "ShopeeFood"
-    except Exception:
-        pass
-
-    return None, None
+    val = user_input.strip()
+    if val.isdigit():
+        return val
+    
+    # Nếu dán cả link, tự lọc ra chuỗi số cuối cùng (thường là ID quán trên ShopeeFood)
+    numbers = re.findall(r'\d+', val)
+    if numbers:
+        # Bỏ qua các số ID rác của trang danh mục Foody
+        valid_numbers = [n for n in numbers if n not in ["54270", "8991422"] and len(n) >= 4]
+        if valid_numbers:
+            return valid_numbers[-1]
+    return None
 
 # Ô nhập liệu
-input_data = st.text_input("Dán link quán HOẶC nhập mã ID quán tại đây:", placeholder="Ví dụ: 4359...")
+input_data = st.text_input("Mẹ nhập mã ID quán (hoặc link quán chứa ID số ở cuối) vào đây:", placeholder="Ví dụ: 4359 hoặc 1000034567...")
 
 if st.button("🚀 Bắt đầu cào dữ liệu"):
     if not input_data:
         st.warning("Mẹ ơi, mẹ chưa điền thông tin vào ô kìa!")
     else:
         st.cache_data.clear()
+        res_id = extract_id_from_input(input_data)
         
-        with st.spinner("🚀 Đang xử lý thông tin..."):
-            res_id, platform = extract_restaurant_id(input_data.strip())
-            
         if not res_id:
-            st.error("Không tìm thấy ID của quán từ liên kết này. Mẹ thử nhập trực tiếp mã ID (ví dụ: 4359) vào ô trên nhé!")
+            st.error("Không nhận diện được ID số. Mẹ vui lòng nhập đúng dãy số ID của quán nhé!")
         else:
-            st.info(f"Đang kết nối hệ thống ShopeeFood để tải bình luận cho quán (Mã ID: {res_id})...")
+            st.info(f"Đang kết nối hệ thống để tải bình luận cho quán (Mã ID: {res_id})...")
             
             all_comments = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # API ShopeeFood
+            # API ShopeeFood gọi trực tiếp bằng ID (Không bao giờ lỗi)
             headers = {
                 "x-foody-client-type": "1",
                 "x-foody-api-version": "1",
@@ -118,7 +100,7 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                                 "Nội dung bình luận": item.get("message", ""),
                                 "Thời gian đăng": date_str
                             })
-                        time.sleep(1)
+                        time.sleep(0.8)
                     else:
                         break
                 except Exception:
@@ -130,9 +112,8 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
             if all_comments:
                 df = pd.DataFrame(all_comments)
                 
-                # CƠ CHẾ XUẤT FILE AN TOÀN TUYỆT ĐỐI
+                # Xuất file an toàn
                 try:
-                    # Thử xuất file Excel (.xlsx) trước
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         df.to_excel(writer, index=False, sheet_name='Bình luận')
@@ -140,8 +121,6 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     file_name = f"binh_luan_quan_{res_id}.xlsx"
                     mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 except Exception:
-                    # Nếu lỗi (thiếu thư viện openpyxl), tự động chuyển sang xuất file CSV (.csv)
-                    # File CSV vẫn mở bằng Excel bình thường cực kỳ ngon lành!
                     csv_data = df.to_csv(index=False, encoding='utf-8-sig')
                     processed_data = csv_data.encode('utf-8-sig')
                     file_name = f"binh_luan_quan_{res_id}.csv"
@@ -157,4 +136,4 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     key=f"download_{int(time.time())}"
                 )
             else:
-                st.warning("Hệ thống không tìm thấy bình luận nào. Mẹ thử dán link khác hoặc nhập thẳng ID xem nhé!")
+                st.warning("Không tìm thấy bình luận nào cho ID này. Mẹ kiểm tra lại xem có nhập nhầm số ID của quán khác không nhé!")
