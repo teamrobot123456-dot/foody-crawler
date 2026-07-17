@@ -8,50 +8,63 @@ from io import BytesIO
 st.set_page_config(page_title="Công Cụ Cào Dữ Liệu Tự Động", page_icon="🍜", layout="centered")
 
 st.title("🍜 Siêu Công Cụ Cào Dữ Liệu Bình Luận")
-st.write("Mẹ chỉ cần dán link quán (Foody hoặc ShopeeFood) vào ô dưới đây rồi bấm nút nhé!")
+st.write("Mẹ dán Link quán hoặc nhập trực tiếp mã ID quán vào ô dưới đây rồi bấm nút nhé!")
 
 # Hàm tự động quét tìm ID quán từ HTML của đường link
-def extract_restaurant_id(url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+def extract_restaurant_id(url_or_id):
+    # Nếu người dùng nhập thẳng một chuỗi số (ID quán)
+    if url_or_id.isdigit():
+        # Mặc định nếu số ngắn (<8 chữ số) thường là Foody, dài hơn là ShopeeFood
+        if len(url_or_id) < 8:
+            return url_or_id, "Foody"
+        else:
+            return url_or_id, "ShopeeFood"
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url_or_id, headers=headers, timeout=10)
         if response.status_code == 200:
             html_text = response.text
-            # 1. Tìm ID kiểu Foody (ví dụ: "Id":16787 hoặc fd.res.view.218=16787)
-            foody_match = re.search(r'"Id":\s*(\d+)', html_text)
+            
+            # 1. Quét tìm ID kiểu Foody trong thẻ meta hoặc script
+            foody_match = re.search(r'"Id":\s*([2-9]\d{2,})', html_text) # Bỏ qua các ID quá nhỏ như 1, 2
             if foody_match:
                 return foody_match.group(1), "Foody"
             
-            # 2. Tìm ID kiểu ShopeeFood (ví dụ: "restaurant_id":100002131)
+            # Quét cua phòng hờ Foody từ url (nếu có dạng số cuối link)
+            url_numbers = re.findall(r'\d+', url_or_id)
+            if url_numbers and len(url_numbers[-1]) >= 4:
+                return url_numbers[-1], "Foody"
+            
+            # 2. Quét tìm ID kiểu ShopeeFood
             shopee_match = re.search(r'"restaurant_id":\s*(\d+)', html_text)
             if shopee_match:
                 return shopee_match.group(1), "ShopeeFood"
             
-            # Tìm cua kiểu phòng hờ cho ShopeeFood trong script tag
             shopee_match_alt = re.search(r'restaurantId\\":\s*(\d+)', html_text)
             if shopee_match_alt:
                 return shopee_match_alt.group(1), "ShopeeFood"
     except Exception as e:
-        st.error(f"Không thể kết nối tới đường link này để lấy ID: {e}")
+        st.error(f"Không thể kết nối tới đường link để lấy ID tự động: {e}")
     return None, None
 
-# Ô nhập link duy nhất cho mẹ
-url_input = st.text_input("Dán link quán vào đây:", placeholder="Dán link Foody hoặc ShopeeFood của quán...")
+# Ô nhập đa năng cho mẹ
+input_data = st.text_input("Dán link quán HOẶC nhập mã ID quán tại đây:", placeholder="Ví dụ: dán link hoặc nhập thẳng số ID như 16787...")
 
 if st.button("🚀 Bắt đầu cào dữ liệu"):
-    if not url_input:
-        st.warning("Mẹ ơi, mẹ chưa dán link kìa!")
+    if not input_data:
+        st.warning("Mẹ ơi, mẹ chưa điền thông tin vào ô kìa!")
     else:
-        # Xóa bộ nhớ tạm của lần cào trước để không bị trùng file cũ
         st.cache_data.clear()
         
-        with st.spinner("🚀 Đang tự động phân tích đường link để lấy ID quán..."):
-            res_id, platform = extract_restaurant_id(url_input.strip())
+        with st.spinner("🚀 Đang xử lý thông tin..."):
+            res_id, platform = extract_restaurant_id(input_data.strip())
             
-        if not res_id:
-            st.error("Không tìm thấy ID quán từ link này. Mẹ kiểm tra lại link đã đúng chưa nhé!")
+        # Phòng hờ nếu quét ra ID = 1 hoặc không tìm thấy
+        if not res_id or res_id == "1":
+            st.error("Không thể lấy ID tự động từ link này do trang web chưa kịp tải. Mẹ vui lòng nhập trực tiếp mã ID của quán vào ô trên nhé!")
         else:
-            st.info(f"Đã tìm thấy ID quán: {res_id} (Thuộc nền tảng: {platform})")
+            st.info(f"Đang tiến hành cào ID quán: {res_id} (Hệ thống: {platform})")
             
             all_comments = []
             progress_bar = st.progress(0)
@@ -149,14 +162,14 @@ if st.button("🚀 Bắt đầu cào dữ liệu"):
                     df.to_excel(writer, index=False, sheet_name='Comments')
                 processed_data = output.getvalue()
                 
-                st.success(f"🎉 Xuất sắc mẹ ơi! Đã cào thành công {len(all_comments)} bình luận mới tinh!")
+                st.success(f"🎉 Xuất sắc mẹ ơi! Đã cào thành công {len(all_comments)} bình luận của quán!")
                 
                 st.download_button(
                     label="📥 Bấm vào đây để tải file Excel về máy",
                     data=processed_data,
                     file_name=f"binh_luan_{platform}_{res_id}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_{int(time.time())}" # Đổi key liên tục để ép nút tải sinh file mới
+                    key=f"download_{int(time.time())}"
                 )
             else:
                 st.warning("Không tìm thấy bình luận nào cho quán này.")
