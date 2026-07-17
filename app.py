@@ -28,30 +28,29 @@ def get_shopeefood_id_from_url(url):
         return clean_url
 
     try:
-        # 2. Nếu là link Foody, thử chuyển hướng hoặc tìm cách quét link ShopeeFood tương ứng
+        # 2. Nếu là link Foody
         if "foody.vn" in clean_url:
             # Cắt bỏ phần /binh-luan ở cuối nếu có
             clean_url = re.sub(r'/(binh-luan|album|video|ban-do|thuc-don|uu-dai).*$', '', clean_url)
-            # Thử gọi lên Foody để lấy HTML và tìm ID quán hoặc link ShopeeFood đi kèm
             r = requests.get(clean_url, headers=headers, timeout=10)
             if r.status_code == 200:
-                # Tìm ID của Foody trong HTML
-                foody_id_match = re.search(r'"RestaurantId"\s*:\s*(\d+)', r.text) or re.search(r'RestaurantID=(\d+)', r.text)
-                if foody_id_match:
-                    return foody_id_match.group(1)
-                
-                # Hoặc tìm link ShopeeFood chứa trong nút "Đặt giao hàng"
-                shopee_link_match = re.search(r'href="([^"]*shopeefood\.vn/[^"]*)"', r.text)
+                # Ưu tiên tìm link ShopeeFood được tích hợp trong nút đặt hàng của Foody
+                shopee_link_match = re.search(r'href="([^"]*shopeefood\.vn/[^"]*)"', r.text) or re.search(r'href="([^"]*deliverynow\.vn/[^"]*)"', r.text)
                 if shopee_link_match:
                     clean_url = shopee_link_match.group(1)
+                else:
+                    # Nếu không tìm thấy link ShopeeFood, mới dùng tạm ID Foody làm phương án dự phòng
+                    foody_id_match = re.search(r'"RestaurantId"\s*:\s*(\d+)', r.text) or re.search(r'RestaurantID=(\d+)', r.text)
+                    if foody_id_match:
+                        return foody_id_match.group(1)
 
-        # 3. Truy cập thẳng vào link ShopeeFood để bới ID ẩn trong HTML
-        if "shopeefood.vn" in clean_url:
+        # 3. Truy cập vào link ShopeeFood để bới ID chuẩn
+        if "shopeefood.vn" in clean_url or "deliverynow.vn" in clean_url:
             r = requests.get(clean_url, headers=headers, timeout=10)
             if r.status_code == 200:
                 html_content = r.text
                 
-                # Tìm kiếm ID trong các thẻ cấu hình ẩn của ShopeeFood (Thường nằm trong Redux State hoặc Meta tags)
+                # Quét ID ShopeeFood trong Redux State hoặc cấu hình web
                 patterns = [
                     r'"restaurant_id"\s*:\s*(\d+)',
                     r'"restaurantId"\s*:\s*(\d+)',
