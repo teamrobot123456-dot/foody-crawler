@@ -25,6 +25,11 @@ st.caption(
     "Chỉ sử dụng cho mục đích nghiên cứu hợp pháp; không thu thập dữ liệu riêng tư, "
     "không vượt qua đăng nhập và nên giới hạn tần suất truy cập."
 )
+st.warning(
+    "Lưu ý nguồn dữ liệu: ứng dụng xuất **bình luận có nội dung chữ trên Foody**. "
+    "Con số như **1,2K đánh giá** trên ShopeeFood thường không đồng nghĩa có 1.200 "
+    "bình luận chữ để xuất Excel."
+)
 
 
 def make_excel(rows: list[dict], metadata: dict) -> bytes:
@@ -40,6 +45,7 @@ def make_excel(rows: list[dict], metadata: dict) -> bytes:
             {"Thông tin": "Chế độ thu thập", "Giá trị": metadata.get("collection_mode", "")},
             {"Thông tin": "Tổng bình luận Foody công bố", "Giá trị": metadata.get("declared_review_count", "")},
             {"Thông tin": "Số bình luận thu thập được", "Giá trị": metadata["review_count"]},
+            {"Thông tin": "Phạm vi nguồn", "Giá trị": metadata.get("source_scope", "")},
             {"Thông tin": "Lý do dừng", "Giá trị": metadata["stop_reason"]},
         ]
     )
@@ -97,6 +103,16 @@ with st.form("crawler_form", clear_on_submit=False):
         step=50,
         disabled=fetch_all,
     )
+    speed_mode = st.selectbox(
+        "Tốc độ thu thập",
+        options=["Nhanh (khuyến nghị)", "Ổn định", "Rất nhanh"],
+        index=0,
+        help=(
+            "Chế độ nhanh gửi mỗi yêu cầu tối đa 30 bình luận và nghỉ 0,30 giây. "
+            "Foody có thể tự giới hạn còn 10 bình luận mỗi phản hồi. Nếu gặp HTTP 429/403, "
+            "hãy chuyển sang Ổn định."
+        ),
+    )
     submitted = st.form_submit_button("Bắt đầu thu thập", type="primary")
 
 
@@ -104,6 +120,12 @@ if submitted:
     progress_text = st.empty()
     progress_bar = st.progress(0) if not fetch_all else None
     selected_max_reviews = None if fetch_all else int(max_reviews)
+    speed_settings = {
+        "Ổn định": {"delay": 0.8, "batch": 10},
+        "Nhanh (khuyến nghị)": {"delay": 0.30, "batch": 30},
+        "Rất nhanh": {"delay": 0.15, "batch": 50},
+    }
+    selected_speed = speed_settings[speed_mode]
 
     try:
         normalized = normalize_restaurant_url(input_url)
@@ -123,7 +145,8 @@ if submitted:
             rows, metadata = crawl_public_reviews(
                 raw_url=input_url,
                 max_reviews=selected_max_reviews,
-                delay_seconds=1.0,
+                delay_seconds=selected_speed["delay"],
+                batch_size=selected_speed["batch"],
                 progress_callback=update_progress,
             )
 
@@ -147,6 +170,10 @@ if submitted:
                     f"Đã thu thập {len(rows)} bình luận. Foody ResId: {metadata['res_id']}."
                 )
             st.caption(metadata["stop_reason"])
+            st.caption(
+                f"Chế độ: {speed_mode} · yêu cầu tối đa {selected_speed['batch']} mục/lượt "
+                f"· nghỉ {selected_speed['delay']:.2f} giây giữa các lượt."
+            )
 
             preview_df = pd.DataFrame(rows)
             st.dataframe(
@@ -166,7 +193,14 @@ if submitted:
             )
 
         with st.expander("Thông tin kỹ thuật"):
-            st.json(metadata)
+            st.json({k: v for k, v in metadata.items() if k != "pagination_diagnostics"})
+
+        with st.expander("Nhật ký phân trang — dùng để kiểm tra trường hợp dừng sớm"):
+            diagnostics = metadata.get("pagination_diagnostics", [])
+            if diagnostics:
+                st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
+            else:
+                st.write("Không có nhật ký phân trang.")
 
     except CrawlerError as exc:
         if progress_bar is not None:
