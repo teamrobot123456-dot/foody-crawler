@@ -1,68 +1,161 @@
-import streamlit as st
-import requests
-import pandas as pd
-import time
+from __future__ import annotations
+
+from datetime import datetime
 from io import BytesIO
 
-st.set_page_config(page_title="Siêu Cào Dữ Liệu", page_icon="🍜")
-st.title("🍜 Siêu Công Cụ Cào Dữ Liệu")
+import pandas as pd
+import streamlit as st
 
-def get_id_from_url(url):
-    """Sử dụng API chuẩn của ShopeeFood để lấy ID từ Slug (tên quán trên link)"""
-    # Lấy slug từ link (ví dụ: 'banh-mi-sot-vang-dinh-ngang')
-    slug = url.strip("/").split("/")[-1].split("?")[0]
-    
-    # API này là 'cửa chính' để lấy thông tin quán
-    api_url = f"https://gappapi.deliverynow.vn/api/delivery/get_detail?request_value={slug}&request_type=2"
-    headers = {
-        "x-foody-client-type": "1",
-        "x-foody-api-version": "1",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
+from foody_client import CrawlerError, crawl_public_reviews, normalize_restaurant_url
+
+
+st.set_page_config(
+    page_title="Cào bình luận Foody",
+    page_icon="🍜",
+    layout="centered",
+)
+
+st.title("🍜 Công cụ thu thập bình luận công khai")
+st.write(
+    "Dán link **trang quán** từ Foody hoặc ShopeeFood. "
+    "Ứng dụng sẽ chuẩn hóa link về trang Foody tương ứng, tải các bình luận công khai "
+    "và tạo file Excel."
+)
+st.caption(
+    "Chỉ sử dụng cho mục đích nghiên cứu hợp pháp; không thu thập dữ liệu riêng tư, "
+    "không vượt qua đăng nhập và nên giới hạn tần suất truy cập."
+)
+
+
+def make_excel(rows: list[dict], metadata: dict) -> bytes:
+    reviews_df = pd.DataFrame(rows)
+    metadata_df = pd.DataFrame(
+        [
+            {"Thông tin": "Thời điểm xuất file", "Giá trị": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            {"Thông tin": "Nền tảng link đầu vào", "Giá trị": metadata["input_platform"]},
+            {"Thông tin": "Link đầu vào", "Giá trị": metadata["input_url"]},
+            {"Thông tin": "Link Foody đã xác định", "Giá trị": metadata["foody_url"]},
+            {"Thông tin": "Phương thức ánh xạ", "Giá trị": metadata["mapping_method"]},
+            {"Thông tin": "Foody ResId", "Giá trị": metadata["res_id"]},
+            {"Thông tin": "Số bình luận", "Giá trị": metadata["review_count"]},
+            {"Thông tin": "Lý do dừng", "Giá trị": metadata["stop_reason"]},
+        ]
+    )
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        reviews_df.to_excel(writer, index=False, sheet_name="Binh_luan")
+        metadata_df.to_excel(writer, index=False, sheet_name="Thong_tin")
+
+        review_sheet = writer.sheets["Binh_luan"]
+        review_sheet.freeze_panes = "A2"
+        review_sheet.auto_filter.ref = review_sheet.dimensions
+
+        widths = {
+            "A": 16,
+            "B": 24,
+            "C": 16,
+            "D": 35,
+            "E": 80,
+            "F": 22,
+            "G": 18,
+            "H": 12,
+            "I": 55,
+            "J": 65,
+        }
+        for column, width in widths.items():
+            review_sheet.column_dimensions[column].width = width
+
+        info_sheet = writer.sheets["Thong_tin"]
+        info_sheet.column_dimensions["A"].width = 28
+        info_sheet.column_dimensions["B"].width = 100
+
+    return output.getvalue()
+
+
+with st.form("crawler_form", clear_on_submit=False):
+    input_url = st.text_input(
+        "Link quán Foody/ShopeeFood",
+        placeholder="https://www.foody.vn/ha-noi/ten-quan",
+    )
+    max_reviews = st.number_input(
+        "Số bình luận tối đa",
+        min_value=10,
+        max_value=1000,
+        value=100,
+        step=10,
+    )
+    submitted = st.form_submit_button("Bắt đầu thu thập", type="primary")
+
+
+if submitted:
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+
     try:
-        r = requests.get(api_url, headers=headers, timeout=10)
-        data = r.json()
-        # Lấy ID từ cấu trúc JSON trả về
-        if "search_result" in data:
-            return str(data["search_result"].get("delivery_id"))
-        elif "reply" in data:
-            return str(data["reply"].get("delivery_id"))
-    except:
-        pass
-    return None
+        normalized = normalize_restaurant_url(input_url)
+        if normalized.input_platform == "ShopeeFood":
+            st.info(
+                "Ứng dụng sẽ tìm link Foody được ShopeeFood liên kết; nếu không tìm thấy, "
+                "ứng dụng thử ánh xạ theo cùng tỉnh/thành và slug. "
+                "File kết quả ghi nhận các bình luận văn bản công khai từ Foody."
+            )
 
-input_data = st.text_input("Dán link quán vào đây (ShopeeFood/Foody):")
+        def update_progress(current_count: int) -> None:
+            progress_text.write(f"Đã nhận {current_count} bình luận...")
+            progress_bar.progress(min(current_count / int(max_reviews), 1.0))
 
-if input_data:
-    with st.spinner("Đang kết nối tới máy chủ ShopeeFood..."):
-        res_id = get_id_from_url(input_data)
-        
-    if res_id:
-        st.success(f"Tìm thấy quán (ID: {res_id})! Đang cào bình luận...")
-        
-        # Cào dữ liệu
-        all_comments = []
-        api_comment_url = "https://gappapi.deliverynow.vn/api/v5/reply/get_replies"
-        for page in range(1, 6): # Cào 5 trang đầu
-            params = {"restaurant_id": res_id, "page": str(page), "count": "10", "reply_type": "1"}
-            r = requests.get(api_comment_url, headers={"x-foody-client-type": "1"}, params=params, timeout=5)
-            if r.status_code == 200:
-                replies = r.json().get("reply_infos", [])
-                if not replies: break
-                for item in replies:
-                    all_comments.append({
-                        "Khách hàng": item.get("user", {}).get("display_name", "Ẩn danh"),
-                        "Bình luận": item.get("message", ""),
-                        "Số sao": item.get("rating", 5)
-                    })
-        
-        if all_comments:
-            df = pd.DataFrame(all_comments)
-            output = BytesIO()
-            df.to_excel(output, index=False)
-            st.download_button("📥 Tải File Excel Kết Quả", data=output.getvalue(), file_name=f"binh_luan_{res_id}.xlsx")
+        with st.spinner("Đang mở trang quán và tải bình luận..."):
+            rows, metadata = crawl_public_reviews(
+                raw_url=input_url,
+                max_reviews=int(max_reviews),
+                delay_seconds=0.8,
+                progress_callback=update_progress,
+            )
+
+        progress_bar.progress(1.0)
+
+        if not rows:
+            st.warning(
+                "Trang quán đã được nhận diện nhưng Foody không trả về bình luận văn bản. "
+                "Quán có thể chỉ có điểm sao hoặc endpoint đã thay đổi."
+            )
         else:
-            st.warning("Không tìm thấy bình luận nào cho quán này.")
-    else:
-        st.error("Không tìm thấy ID từ link này. Bạn thử kiểm tra lại link xem có đúng là trang quán không nhé!")
+            st.success(
+                f"Đã thu thập {len(rows)} bình luận. Foody ResId: {metadata['res_id']}."
+            )
+            st.caption(metadata["stop_reason"])
+
+            preview_df = pd.DataFrame(rows)
+            st.dataframe(
+                preview_df[["Tên người dùng", "Điểm đánh giá", "Ngày đăng", "Nội dung bình luận"]].head(20),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            excel_data = make_excel(rows, metadata)
+            safe_slug = normalized.restaurant_slug[:80]
+            st.download_button(
+                "📥 Tải file Excel",
+                data=excel_data,
+                file_name=f"binh_luan_{safe_slug}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+
+        with st.expander("Thông tin kỹ thuật"):
+            st.json(metadata)
+
+    except CrawlerError as exc:
+        progress_bar.empty()
+        progress_text.empty()
+        st.error(str(exc))
+        st.info(
+            "Hãy kiểm tra rằng link có dạng trang quán, ví dụ: "
+            "https://www.foody.vn/ha-noi/ten-quan. "
+            "Không dùng link trang tìm kiếm hoặc link rút gọn."
+        )
+    except Exception as exc:
+        progress_bar.empty()
+        progress_text.empty()
+        st.exception(exc)
