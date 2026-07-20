@@ -291,7 +291,7 @@ def fetch_foody_reviews(
     session: requests.Session,
     res_id: str,
     foody_url: str,
-    max_reviews: int = 100,
+    max_reviews: int | None = 100,
     delay_seconds: float = 0.8,
     timeout: int = 20,
     progress_callback: Callable[[int], None] | None = None,
@@ -300,14 +300,19 @@ def fetch_foody_reviews(
     if not str(res_id).isdigit():
         raise CrawlerError("Foody ResId không hợp lệ.")
 
-    max_reviews = max(1, min(int(max_reviews), 1000))
+    if max_reviews is not None:
+        max_reviews = max(1, int(max_reviews))
+
+    max_pages = 5000  # Chốt an toàn chống vòng lặp vô hạn (tối đa khoảng 50.000 bình luận).
     last_id = ""
     seen_ids: set[str] = set()
     rows: list[dict] = []
     page_number = 1
     stop_reason = "Đã tải hết dữ liệu Foody trả về."
 
-    while len(rows) < max_reviews:
+    while page_number <= max_pages:
+        if max_reviews is not None and len(rows) >= max_reviews:
+            break
         params = {
             "t": str(int(time.time() * 1000)),
             "ResId": str(res_id),
@@ -372,7 +377,7 @@ def fetch_foody_reviews(
             seen_ids.add(dedupe_key)
             rows.append(_review_to_row(item, foody_url))
             added_this_page += 1
-            if len(rows) >= max_reviews:
+            if max_reviews is not None and len(rows) >= max_reviews:
                 stop_reason = f"Đã đạt giới hạn {max_reviews} bình luận do người dùng đặt."
                 break
 
@@ -394,12 +399,18 @@ def fetch_foody_reviews(
         page_number += 1
         time.sleep(max(0.0, delay_seconds))
 
-    return rows[:max_reviews], stop_reason
+    if page_number > max_pages:
+        stop_reason = (
+            f"Đã chạm giới hạn an toàn {max_pages} trang để tránh vòng lặp vô hạn. "
+            "Hãy kiểm tra file và chạy tiếp nếu quán có trên khoảng 50.000 bình luận."
+        )
+
+    return rows if max_reviews is None else rows[:max_reviews], stop_reason
 
 
 def crawl_public_reviews(
     raw_url: str,
-    max_reviews: int = 100,
+    max_reviews: int | None = 100,
     delay_seconds: float = 0.8,
     progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[list[dict], dict]:
@@ -422,6 +433,7 @@ def crawl_public_reviews(
         "mapping_method": mapping_method,
         "resolved_url": resolved_url,
         "res_id": res_id,
+        "collection_mode": "Toàn bộ" if max_reviews is None else f"Tối đa {max_reviews}",
         "review_count": len(rows),
         "stop_reason": stop_reason,
     }

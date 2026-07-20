@@ -37,6 +37,7 @@ def make_excel(rows: list[dict], metadata: dict) -> bytes:
             {"Thông tin": "Link Foody đã xác định", "Giá trị": metadata["foody_url"]},
             {"Thông tin": "Phương thức ánh xạ", "Giá trị": metadata["mapping_method"]},
             {"Thông tin": "Foody ResId", "Giá trị": metadata["res_id"]},
+            {"Thông tin": "Chế độ thu thập", "Giá trị": metadata.get("collection_mode", "")},
             {"Thông tin": "Số bình luận", "Giá trị": metadata["review_count"]},
             {"Thông tin": "Lý do dừng", "Giá trị": metadata["stop_reason"]},
         ]
@@ -78,19 +79,30 @@ with st.form("crawler_form", clear_on_submit=False):
         "Link quán Foody/ShopeeFood",
         placeholder="https://www.foody.vn/ha-noi/ten-quan",
     )
+    fetch_all = st.checkbox(
+        "Lấy toàn bộ bình luận công khai Foody trả về",
+        value=True,
+        help=(
+            "Ứng dụng sẽ tiếp tục phân trang cho tới khi Foody không còn trả thêm "
+            "bình luận. Tổng lượt đánh giá sao trên ShopeeFood có thể lớn hơn số "
+            "bình luận văn bản công khai trên Foody."
+        ),
+    )
     max_reviews = st.number_input(
-        "Số bình luận tối đa",
+        "Số bình luận tối đa khi không lấy toàn bộ",
         min_value=10,
-        max_value=1000,
-        value=100,
-        step=10,
+        max_value=50000,
+        value=500,
+        step=50,
+        disabled=fetch_all,
     )
     submitted = st.form_submit_button("Bắt đầu thu thập", type="primary")
 
 
 if submitted:
     progress_text = st.empty()
-    progress_bar = st.progress(0)
+    progress_bar = st.progress(0) if not fetch_all else None
+    selected_max_reviews = None if fetch_all else int(max_reviews)
 
     try:
         normalized = normalize_restaurant_url(input_url)
@@ -103,17 +115,19 @@ if submitted:
 
         def update_progress(current_count: int) -> None:
             progress_text.write(f"Đã nhận {current_count} bình luận...")
-            progress_bar.progress(min(current_count / int(max_reviews), 1.0))
+            if progress_bar is not None and selected_max_reviews:
+                progress_bar.progress(min(current_count / selected_max_reviews, 1.0))
 
         with st.spinner("Đang mở trang quán và tải bình luận..."):
             rows, metadata = crawl_public_reviews(
                 raw_url=input_url,
-                max_reviews=int(max_reviews),
-                delay_seconds=0.8,
+                max_reviews=selected_max_reviews,
+                delay_seconds=1.0,
                 progress_callback=update_progress,
             )
 
-        progress_bar.progress(1.0)
+        if progress_bar is not None:
+            progress_bar.progress(1.0)
 
         if not rows:
             st.warning(
@@ -147,7 +161,8 @@ if submitted:
             st.json(metadata)
 
     except CrawlerError as exc:
-        progress_bar.empty()
+        if progress_bar is not None:
+            progress_bar.empty()
         progress_text.empty()
         st.error(str(exc))
         st.info(
@@ -156,6 +171,7 @@ if submitted:
             "Không dùng link trang tìm kiếm hoặc link rút gọn."
         )
     except Exception as exc:
-        progress_bar.empty()
+        if progress_bar is not None:
+            progress_bar.empty()
         progress_text.empty()
         st.exception(exc)
