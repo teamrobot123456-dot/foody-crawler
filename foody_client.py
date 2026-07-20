@@ -143,12 +143,28 @@ def _numeric_candidates(values: Iterable[str | None]) -> list[str]:
     return result
 
 
+def _extract_declared_review_count(page_html: str) -> int | None:
+    """Đọc tổng số bình luận mà trang Foody công bố, nếu tìm thấy."""
+    patterns = [
+        r"([\d.,]+)\s*bình\s*luận",
+        r"ReviewCount[\"']?\s*[:=]\s*[\"']?([\d.,]+)",
+        r"TotalReview[\"']?\s*[:=]\s*[\"']?([\d.,]+)",
+    ]
+    values: list[int] = []
+    for pattern in patterns:
+        for raw in re.findall(pattern, page_html, flags=re.IGNORECASE):
+            digits = re.sub(r"\D", "", str(raw))
+            if digits:
+                values.append(int(digits))
+    return max(values) if values else None
+
+
 def resolve_foody_res_id(
     session: requests.Session,
     foody_url: str,
     timeout: int = 20,
-) -> tuple[str, str]:
-    """Mở trang quán và lấy Foody ResId từ cookie hoặc HTML."""
+) -> tuple[str, str, int | None]:
+    """Mở trang quán, lấy Foody ResId và tổng số bình luận được công bố."""
     try:
         response = session.get(
             foody_url,
@@ -176,7 +192,6 @@ def resolve_foody_res_id(
 
     page_html = response.text
 
-    # Foody thường đặt cookie dạng fd.res.view.<location_id>=<res_id>
     cookie_values = [
         cookie.value
         for cookie in session.cookies
@@ -184,7 +199,6 @@ def resolve_foody_res_id(
     ]
     candidates = _numeric_candidates(cookie_values)
 
-    # Dự phòng khi cấu trúc cookie thay đổi: tìm một số mẫu thường gặp trong HTML/JS.
     patterns = [
         r"fd\.res\.view\.\d+\s*=\s*(\d+)",
         r"[\"']ResId[\"']\s*[:=]\s*[\"']?(\d+)",
@@ -204,9 +218,8 @@ def resolve_foody_res_id(
             "hoặc Foody vừa thay đổi cấu trúc trang."
         )
 
-    # Session mới chỉ vừa mở một trang quán, vì vậy ứng viên đầu tiên từ cookie là ưu tiên.
-    return candidates[0], response.url
-
+    declared_count = _extract_declared_review_count(page_html)
+    return candidates[0], response.url, declared_count
 
 def _clean_text(value: object) -> str:
     if value is None:
@@ -287,126 +300,192 @@ def _review_to_row(item: dict, foody_url: str) -> dict:
     }
 
 
+def _request_review_batch(
+    session: requests.Session,
+    *,
+    res_id: str,
+    foody_url: str,
+    last_id: str,
+    is_latest: bool,
+    exclude_ids: list[str],
+    count: int,
+    timeout: int,
+) -> list[dict]:
+    # Foody dùng ExcludeIds cho các bình luận đã hiện. Chỉ gửi một cửa sổ gần nhất
+    # để URL không quá dài. Endpoint là nội bộ nên cấu trúc có thể thay đổi.
+    exclude_value = ",".join(exclude_ids[-100:])
+    params = {
+        "t": str(int(time.time() * 1000)),
+        "ResId": str(res_id),
+        "LastId": last_id,
+        "Count": str(count),
+        "Type": "1",
+        "fromOwner": "",
+        "isLatest": "true" if is_latest else "false",
+        "ExcludeIds": exclude_value,
+    }
+    headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": foody_url,
+    }
+    response = session.get(
+        FOODY_REVIEW_ENDPOINT,
+        params=params,
+        headers=headers,
+        timeout=timeout,
+    )
+    if response.status_code in {403, 429}:
+        raise CrawlerError(
+            f"Foody tạm giới hạn yêu cầu (HTTP {response.status_code}). "
+            "Dữ liệu có thể chưa được tải đầy đủ."
+        )
+    if response.status_code >= 400:
+        raise CrawlerError(
+            f"Endpoint bình luận trả về HTTP {response.status_code}."
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        preview = _clean_text(response.text[:250])
+        raise CrawlerError(
+            "Foody không trả về JSON như dự kiến. "
+            f"Phản hồi bắt đầu bằng: {preview or '[rỗng]'}"
+        ) from exc
+    return _get_items(payload)
+
+
 def fetch_foody_reviews(
     session: requests.Session,
     res_id: str,
     foody_url: str,
     max_reviews: int | None = 100,
+    declared_review_count: int | None = None,
     delay_seconds: float = 0.8,
     timeout: int = 20,
     progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[list[dict], str]:
-    """Tải bình luận công khai từ endpoint mà trang Foody sử dụng."""
+    """Tải bình luận công khai và thử hai chế độ phân trang của Foody.
+
+    Foody đôi khi dừng đúng ở 100 mục khi dùng isLatest=true. Khi tổng công bố
+    trên trang lớn hơn số đã lấy, hàm chuyển sang isLatest=false và gửi ExcludeIds
+    để thử lấy phần bình luận cũ hơn mà không vượt qua đăng nhập.
+    """
     if not str(res_id).isdigit():
         raise CrawlerError("Foody ResId không hợp lệ.")
-
     if max_reviews is not None:
         max_reviews = max(1, int(max_reviews))
 
-    max_pages = 5000  # Chốt an toàn chống vòng lặp vô hạn (tối đa khoảng 50.000 bình luận).
-    last_id = ""
+    target = max_reviews if max_reviews is not None else declared_review_count
+    max_pages = 5000
     seen_ids: set[str] = set()
+    ordered_ids: list[str] = []
     rows: list[dict] = []
-    page_number = 1
-    stop_reason = "Đã tải hết dữ liệu Foody trả về."
+    last_id = ""
+    page_number = 0
+    stagnant_batches = 0
 
-    while page_number <= max_pages:
-        if max_reviews is not None and len(rows) >= max_reviews:
-            break
-        params = {
-            "t": str(int(time.time() * 1000)),
-            "ResId": str(res_id),
-            "LastId": last_id,
-            "Count": "10",
-            "Type": "1",
-            "fromOwner": "",
-            "isLatest": "true",
-            "ExcludeIds": "",
-        }
-        headers = {
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": foody_url,
-        }
+    # Chế độ 1: mới nhất. Chế độ 2: bình luận cũ hơn.
+    modes = [True, False]
+    for is_latest in modes:
+        # Khi chuyển chế độ, thử tiếp từ cursor cũ; nếu không có dữ liệu sẽ thử lại từ đầu
+        # với ExcludeIds để Foody bỏ qua các mục đã nhận.
+        mode_last_id = last_id
+        restarted_without_cursor = False
 
-        try:
-            response = session.get(
-                FOODY_REVIEW_ENDPOINT,
-                params=params,
-                headers=headers,
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            raise CrawlerError(f"Lỗi khi tải trang bình luận {page_number}: {exc}") from exc
+        while page_number < max_pages:
+            if target is not None and len(rows) >= target:
+                break
+            page_number += 1
+            try:
+                items = _request_review_batch(
+                    session,
+                    res_id=res_id,
+                    foody_url=foody_url,
+                    last_id=mode_last_id,
+                    is_latest=is_latest,
+                    exclude_ids=ordered_ids,
+                    count=10,
+                    timeout=timeout,
+                )
+            except requests.RequestException as exc:
+                raise CrawlerError(f"Lỗi khi tải lượt {page_number}: {exc}") from exc
 
-        if response.status_code in {403, 429}:
-            raise CrawlerError(
-                f"Foody tạm giới hạn yêu cầu ở trang {page_number} "
-                f"(HTTP {response.status_code}). Dữ liệu chưa được tải đầy đủ."
-            )
-        if response.status_code >= 400:
-            raise CrawlerError(
-                f"Endpoint bình luận trả về HTTP {response.status_code} ở trang {page_number}."
-            )
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            preview = _clean_text(response.text[:250])
-            raise CrawlerError(
-                "Foody không trả về JSON như dự kiến. "
-                f"Phản hồi bắt đầu bằng: {preview or '[rỗng]'}"
-            ) from exc
-
-        items = _get_items(payload)
-        if not items:
-            break
-
-        added_this_page = 0
-        for item in items:
-            review_id = str(
-                item.get("Id")
-                or item.get("id")
-                or item.get("ReviewId")
-                or item.get("review_id")
-                or ""
-            )
-            dedupe_key = review_id or repr(item)
-            if dedupe_key in seen_ids:
-                continue
-            seen_ids.add(dedupe_key)
-            rows.append(_review_to_row(item, foody_url))
-            added_this_page += 1
-            if max_reviews is not None and len(rows) >= max_reviews:
-                stop_reason = f"Đã đạt giới hạn {max_reviews} bình luận do người dùng đặt."
+            if not items:
+                # Một số phiên Foody không chấp nhận cursor của chế độ latest khi đổi
+                # sang old. Thử lại một lần từ đầu nhưng giữ ExcludeIds.
+                if not is_latest and mode_last_id and not restarted_without_cursor:
+                    mode_last_id = ""
+                    restarted_without_cursor = True
+                    time.sleep(max(0.0, delay_seconds))
+                    continue
                 break
 
-        if progress_callback:
-            progress_callback(len(rows))
+            added_this_batch = 0
+            for item in items:
+                review_id = str(
+                    item.get("Id")
+                    or item.get("id")
+                    or item.get("ReviewId")
+                    or item.get("review_id")
+                    or ""
+                )
+                dedupe_key = review_id or repr(item)
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                if review_id:
+                    ordered_ids.append(review_id)
+                rows.append(_review_to_row(item, foody_url))
+                added_this_batch += 1
+                if max_reviews is not None and len(rows) >= max_reviews:
+                    break
 
-        next_last_id = str(
-            items[-1].get("Id")
-            or items[-1].get("id")
-            or items[-1].get("ReviewId")
-            or items[-1].get("review_id")
-            or ""
-        )
-        if not next_last_id or next_last_id == last_id or added_this_page == 0:
-            stop_reason = "Foody không cung cấp mốc phân trang tiếp theo; tiến trình đã dừng an toàn."
+            if progress_callback:
+                progress_callback(len(rows))
+
+            next_last_id = str(
+                items[-1].get("Id")
+                or items[-1].get("id")
+                or items[-1].get("ReviewId")
+                or items[-1].get("review_id")
+                or ""
+            )
+
+            if added_this_batch == 0:
+                stagnant_batches += 1
+            else:
+                stagnant_batches = 0
+
+            if next_last_id and next_last_id != mode_last_id:
+                mode_last_id = next_last_id
+                last_id = next_last_id
+            elif added_this_batch == 0:
+                stagnant_batches += 1
+
+            if stagnant_batches >= 3:
+                break
+            time.sleep(max(0.0, delay_seconds))
+
+        if target is not None and len(rows) >= target:
             break
 
-        last_id = next_last_id
-        page_number += 1
-        time.sleep(max(0.0, delay_seconds))
-
-    if page_number > max_pages:
+    if max_reviews is not None and len(rows) >= max_reviews:
+        stop_reason = f"Đã đạt giới hạn {max_reviews} bình luận do người dùng đặt."
+    elif declared_review_count is not None and len(rows) >= declared_review_count:
         stop_reason = (
-            f"Đã chạm giới hạn an toàn {max_pages} trang để tránh vòng lặp vô hạn. "
-            "Hãy kiểm tra file và chạy tiếp nếu quán có trên khoảng 50.000 bình luận."
+            f"Đã thu thập đủ {len(rows)}/{declared_review_count} bình luận theo tổng số Foody công bố."
         )
+    elif declared_review_count is not None and len(rows) < declared_review_count:
+        stop_reason = (
+            f"Foody công bố {declared_review_count} bình luận nhưng endpoint công khai chỉ trả về "
+            f"{len(rows)} bình luận trong phiên này. Phần còn lại có thể là dữ liệu cũ/ẩn, "
+            "đã bị gỡ hoặc chỉ được trả về trong phiên đăng nhập; ứng dụng không vượt qua đăng nhập."
+        )
+    else:
+        stop_reason = "Đã tải hết dữ liệu mà endpoint công khai Foody trả về trong phiên này."
 
     return rows if max_reviews is None else rows[:max_reviews], stop_reason
-
 
 def crawl_public_reviews(
     raw_url: str,
@@ -417,12 +496,13 @@ def crawl_public_reviews(
     normalized = normalize_restaurant_url(raw_url)
     session = build_session()
     foody_url, mapping_method = discover_foody_url_from_shopeefood(session, normalized)
-    res_id, resolved_url = resolve_foody_res_id(session, foody_url)
+    res_id, resolved_url, declared_review_count = resolve_foody_res_id(session, foody_url)
     rows, stop_reason = fetch_foody_reviews(
         session=session,
         res_id=res_id,
         foody_url=foody_url,
         max_reviews=max_reviews,
+        declared_review_count=declared_review_count,
         delay_seconds=delay_seconds,
         progress_callback=progress_callback,
     )
@@ -433,8 +513,10 @@ def crawl_public_reviews(
         "mapping_method": mapping_method,
         "resolved_url": resolved_url,
         "res_id": res_id,
+        "declared_review_count": declared_review_count,
         "collection_mode": "Toàn bộ" if max_reviews is None else f"Tối đa {max_reviews}",
         "review_count": len(rows),
         "stop_reason": stop_reason,
     }
     return rows, metadata
+

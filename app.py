@@ -38,7 +38,8 @@ def make_excel(rows: list[dict], metadata: dict) -> bytes:
             {"Thông tin": "Phương thức ánh xạ", "Giá trị": metadata["mapping_method"]},
             {"Thông tin": "Foody ResId", "Giá trị": metadata["res_id"]},
             {"Thông tin": "Chế độ thu thập", "Giá trị": metadata.get("collection_mode", "")},
-            {"Thông tin": "Số bình luận", "Giá trị": metadata["review_count"]},
+            {"Thông tin": "Tổng bình luận Foody công bố", "Giá trị": metadata.get("declared_review_count", "")},
+            {"Thông tin": "Số bình luận thu thập được", "Giá trị": metadata["review_count"]},
             {"Thông tin": "Lý do dừng", "Giá trị": metadata["stop_reason"]},
         ]
     )
@@ -135,9 +136,16 @@ if submitted:
                 "Quán có thể chỉ có điểm sao hoặc endpoint đã thay đổi."
             )
         else:
-            st.success(
-                f"Đã thu thập {len(rows)} bình luận. Foody ResId: {metadata['res_id']}."
-            )
+            declared = metadata.get('declared_review_count')
+            if declared:
+                st.success(
+                    f"Đã thu thập {len(rows)}/{declared} bình luận Foody công bố. "
+                    f"Foody ResId: {metadata['res_id']}."
+                )
+            else:
+                st.success(
+                    f"Đã thu thập {len(rows)} bình luận. Foody ResId: {metadata['res_id']}."
+                )
             st.caption(metadata["stop_reason"])
 
             preview_df = pd.DataFrame(rows)
